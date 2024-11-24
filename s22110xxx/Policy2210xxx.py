@@ -1,12 +1,8 @@
-from policy import Policy
-import torch.nn as nn
 import torch
-from torch.optim import Adam
-import time
-import numpy as np
-import torch.nn.functional as F
-from torch.distributions import Categorical
 from module import *
+import numpy as np
+import matplotlib.pyplot as plt
+from policy import Policy
 
 
 def Policy2210xxx(Policy):
@@ -14,335 +10,304 @@ def Policy2210xxx(Policy):
 
 
 class PPO:
-    def __init__(self, env):
-        self.timesteps_per_batch = 3000  # Number of timesteps to run per batch
-        self.max_timesteps_per_episode = 600 # Max number of timesteps per episode
-        self.n_updates_per_iteration = 15 # Number of times to update actor/critic per iteration
-        self.lr = 0.0001  # Learning rate of actor optimizer
-        self.gamma = 0.99  # Discount factor to be applied when calculating Rewards-To-Go
-        self.clip = 0.2  # Recommended 0.2, helps define the threshold to clip the ratio during SGA
+    def __init__(self, env=None, load_check_pontis=False):
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.gamma = 0.99
+        self.policy_clip = 0.2
+        self.n_epochs = 15
+        self.gae_lambda = 0.95
+        self.rollout_steps = 50  # N - big batch
+        self.batch_size = 10
+        self.leaning_rate = 0.1
 
-        # Miscellaneous parameters
-        self.render = False  # If we should render during rollout
-        self.render_every_i = 10  # Only render every n iterations
-        self.save_freq = 100  # How often we save in number of iterations
-        self.seed = None
-
-        # Extract environment information
-        self.env = env
         self.customObs = []
-        self.min_w = 50
-        self.min_h = 50
-        self.max_w = 100
-        self.max_h = 100
-        self.num_stocks = 100
-        self.max_product_type = 25
-        self.max_product_per_type = 20
-        self.obs_dim = 2275  # 100*2(stocks) + 3*25(products) + 4*20*25(last moves)
-        self.act_dim = [100,25,100,100]  # [stock idx, product idx, x, y]
+        self.obsInfo = dict()
+        self.filter_out = 256
+        self.n_actions = 3  # [stock idx, x, y]
+        self.actor = ActorNetwork(self.n_actions, self.filter_out, self.leaning_rate)
+        self.env = env
+        if load_check_pontis or env is None:
+            self.actor.load_checkpoint()
+            # self.critic.load_checkpoint()
+        self.memory = PPOMemory(self.batch_size)
+        self.old_action = None  # for inference
 
-        # Initialize actor and critic networks
-        self.actor = PPOActor(self.obs_dim,self.act_dim)  # ALG STEP 1
-        self.critic = ValueNet(self.obs_dim)
+    def remember(self, state, action, probs, vals, reward, done):
+        self.memory.store_memory(state, action, probs, vals, reward, done)
 
-        # Initialize optimizers for actor and critic
-        self.actor_optim = Adam(self.actor.parameters(), lr=self.lr)
-        self.critic_optim = Adam(self.critic.parameters(), lr=self.lr)
+    def save_models(self):
+        print('... saving models ...')
+        self.actor.save_checkpoint()
+        # self.critic.save_checkpoint()
 
-        self.logger = {
-            'delta_t': time.time_ns(),
-            't_so_far': 0,  # timesteps so far
-            'i_so_far': 0,  # iterations so far
-            'batch_lens': [],  # episodic lengths in batch
-            'batch_rews': [],  # episodic returns in batch
-            'actor_losses': [],  # losses of actor network in current iteration
-        }
+    def load_models(self):
+        print('... loading models ...')
+        self.actor.load_checkpoint()
+        # self.critic.load_checkpoint()
 
-    def learn(self, total_timesteps):
-        print(f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
-        print(f"{self.timesteps_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
-        t_so_far = 0  # Timesteps simulated so far
-        i_so_far = 0  # Iterations ran so far
-        while t_so_far < total_timesteps:  # ALG STEP 2
-            # Autobots, roll out (just kidding, we're collecting our batch simulations here)
-            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens = self.rollout()  # ALG STEP 3
+    def choose_action(self, observation):
+        # state = torch.tensor([observation], dtype=torch.float).to(self.actor.device)
+        dist, value = self.actor([observation])
+        action = dist.sample()
+        probs = torch.squeeze(dist.log_prob(action).sum()).item()
+        value = torch.squeeze(value).item()
+        return action, probs, value
 
-            # Calculate how many timesteps we collected this batch
-            t_so_far += np.sum(batch_lens)
-
-            # Increment the number of iterations
-            i_so_far += 1
-
-            # Logging timesteps so far and iterations so far
-            self.logger['t_so_far'] = t_so_far
-            self.logger['i_so_far'] = i_so_far
-
-            # Calculate advantage at k-th iteration
-            V, _ = self.evaluate(batch_obs, batch_acts)
-            A_k = batch_rtgs - V.detach()  # ALG STEP 5
-
-            A_k = (A_k - A_k.mean()) / (A_k.std() + 1e-10)
-
-            # This is the loop where we update our network for some n epochs
-            for _ in range(self.n_updates_per_iteration):  # ALG STEP 6 & 7
-                # Calculate V_phi and pi_theta(a_t | s_t)
-                V, curr_log_probs = self.evaluate(batch_obs, batch_acts)
-
-                ratios = torch.exp(curr_log_probs - batch_log_probs)
-
-                # Calculate surrogate losses.
-                surr1 = ratios * A_k
-                surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * A_k
-
-                actor_loss = (-torch.min(surr1, surr2)).mean()
-                critic_loss = nn.MSELoss()(V, batch_rtgs)
-
-                self.actor_optim.zero_grad()
-                actor_loss.backward(retain_graph=True)
-                self.actor_optim.step()
-
-                self.critic_optim.zero_grad()
-                critic_loss.backward()
-                self.critic_optim.step()
-
-                # Log actor loss
-                self.logger['actor_losses'].append(actor_loss.detach())
-
-            # Print a summary of our training so far
-            self._log_summary()
-
-            # Save our model if it's time
-            if i_so_far % self.save_freq == 0:
-                torch.save(self.actor.state_dict(), './models/ppo_actor.pth')
-                torch.save(self.critic.state_dict(), './models/ppo_critic.pth')
-
-    def rollout(self):
-        batch_obs = []
-        batch_acts = []
-        batch_log_probs = []
-        batch_rews = []
-        batch_rtgs = []
-        batch_lens = []
-
-        t = 0  # Keeps track of how many timesteps we've run so far this batch
-
-        while t < self.timesteps_per_batch:
-            ep_rews = []  # rewards collected per episode
-
-            # Reset the environment. sNote that obs is short for observation.
-            obs, _ = self.env.reset()
+    def get_action(self, obs, info):
+        if len(self.customObs) == 0:
             self.resetCustomObservation(obs)
-            done = False
-
-            # Run an episode for a maximum of max_timesteps_per_episode timesteps
-            for ep_t in range(self.max_timesteps_per_episode):
-                # If render is specified, render the environment
-                #print("Rolling out in",ep_t)
-                if self.render and (self.logger['i_so_far'] % self.render_every_i == 0) and len(batch_lens) == 0:
-                    self.env.render()
-
-                t += 1  # Increment timesteps ran this batch so far
-
-                # Track observations in this batch
-                batch_obs.append(self.customObs)
-
-                # Calculate action and make a step in the env.
-                # Note that rew is short for reward.
-                action, log_prob = self.get_action(self.customObs)
-                customReward = self.getCustomReward(obs,action)
-                convertedAction = self.convertAction(action)
-                obs, rew, terminated, truncated, _ = self.env.step(convertedAction)
-                self.updateCustomObservation(obs,action)
-                # Don't really care about the difference between terminated or truncated in this, so just combine them
-                done = terminated | truncated
-
-                # Track recent reward, action, and action log probability
-                ep_rews.append(customReward)
-                batch_acts.append(action)
-                batch_log_probs.append(log_prob)
-
-                # If the environment tells us the episode is terminated, break
-                if done:
-                    break
-
-            # Track episodic lengths and rewards
-            batch_lens.append(ep_t + 1)
-            batch_rews.append(ep_rews)
-
-        # Reshape data as tensors in the shape specified in function description, before returning
-        batch_obs = torch.tensor(batch_obs, dtype=torch.float)
-        batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.float)
-        #print(batch_log_probs)
-        batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float)
-        batch_rtgs = self.compute_rtgs(batch_rews)  # ALG STEP 4
-
-        # Log the episodic returns and episodic lengths in this batch.
-        self.logger['batch_rews'] = batch_rews
-        self.logger['batch_lens'] = batch_lens
-
-        return batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens
-
-    def compute_rtgs(self, batch_rews):
-
-        batch_rtgs = []
-        # Iterate through each episode
-        for ep_rews in reversed(batch_rews):
-            discounted_reward = 0  # The discounted reward so far
-            for rew in reversed(ep_rews):
-                discounted_reward = rew + discounted_reward * self.gamma
-                batch_rtgs.insert(0, discounted_reward)
-        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float)
-        return batch_rtgs
-
-    def get_action(self, obs):
-        # Query the actor network for a mean action
-        logits = self.actor(obs)
-        probs = [F.softmax(logit, dim=-1) for logit in logits]
-        actions = []
-        log_probs = torch.tensor(0, dtype=torch.float)
-        for prob in probs:
-            dist = Categorical(prob)
+            self.stepInfo()
+        else:
+            self.updateCustomObservation(obs, self.old_action)
+        with torch.no_grad():
+            #state = torch.tensor([self.customObs], dtype=torch.float).to(self.actor.device)
+            dist, val = self.actor([self.customObs])
             action = dist.sample()
-            log_probs += dist.log_prob(action)
-            actions.append(action.item())
+        scaledAction = self.getScaledAction(action)
+        convertedAction = self.convertAction(scaledAction)
+        reward, done = self.getCustomReward(obs, scaledAction)
+        self.old_action = scaledAction
+        if done:
+            self.customObs = []
+        return convertedAction
 
-        return np.array(actions), log_probs.detach()
+    def stepInfo(self, postInfo=False):
+        count = quantity = 0
+        for p in self.obsInfo["productInfo"]:
+            count += 1
+            quantity += p[3]
 
-    def evaluate(self, batch_obs, batch_acts):
-        V = self.critic(batch_obs).squeeze()
+        if postInfo:
+            print(f'Remaining products: {quantity}, intactStock: {len(self.obsInfo["intact"])}')
+        else:
+            print(f'---------------------------------------',
+                  f'\nTotal product types: {count}, products demand: {quantity}')
 
-        logits = self.actor(batch_obs)
-        probs = [F.softmax(logit, dim=-1) for logit in logits]
-        log_probs = [0 for _ in range(batch_obs.shape[0])]
-        log_probs = torch.tensor(log_probs, dtype=torch.float)
-        batch_acts = torch.transpose(batch_acts, 0, 1)
-        for prob, acts in zip(probs, batch_acts):
-            dist = Categorical(prob)
-            log_probs += dist.log_prob(acts)
-        # Return the value vector V of each observation in the batch
-        # and log probabilities log_probs of each action in the batch
-        return V, log_probs
+    def train(self, total_timestep, timestep_per_game=2_000):
+        figure_file = 'rewards.png'
+        best_score = -10000
+        score_history = []
+        learn_iters = 0
+        avg_score = 0
+        n_steps = 0
 
-    def _log_summary(self):
-        # Calculate logging values. I use a few python shortcuts to calculate each value
-        # without explaining since it's not too important to PPO; feel free to look it over,
-        # and if you have any questions you can email me (look at bottom of README)
-        delta_t = self.logger['delta_t']
-        self.logger['delta_t'] = time.time_ns()
-        delta_t = (self.logger['delta_t'] - delta_t) / 1e9
-        delta_t = str(round(delta_t, 2))
+        while n_steps < total_timestep:
+            observation, _ = self.env.reset()
+            self.resetCustomObservation(observation)
+            #
+            done = False
+            score = 0
+            game_timestep = 0
+            self.stepInfo()
+            while game_timestep < timestep_per_game and (not done):
+                action, prob, val = self.choose_action(self.customObs)
+                scaledAction = self.getScaledAction(action)
+                convertedAction = self.convertAction(scaledAction)
+                reward, _ = self.getCustomReward(observation, scaledAction)
+                observation_, _, done, _, info = self.env.step(convertedAction)
 
-        t_so_far = self.logger['t_so_far']
-        i_so_far = self.logger['i_so_far']
-        avg_ep_lens = np.mean(self.logger['batch_lens'])
-        avg_ep_rews = np.mean([np.sum(ep_rews) for ep_rews in self.logger['batch_rews']])
-        avg_actor_loss = np.mean([losses.float().mean() for losses in self.logger['actor_losses']])
+                n_steps += 1
+                game_timestep += 1
+                score += reward
+                self.remember(self.customObs, action, prob, val, reward, done)
+                self.updateCustomObservation(observation_, scaledAction)
+                if n_steps % self.rollout_steps == 0:
+                    self.learn()
+                    learn_iters += 1
+                observation = observation_
+                if n_steps % 1000 == 0:
+                    print("done step ", n_steps)
+                    self.stepInfo(True)
+            score_history.append(score)
+            avg_score = np.mean(score_history[-100:])
+            normalized_reward = score / game_timestep
+            if normalized_reward > best_score:
+                best_score = normalized_reward
+                self.save_models()
 
-        # Round decimal places for more aesthetic logging messages
-        avg_ep_lens = str(round(avg_ep_lens, 2))
-        avg_ep_rews = str(round(avg_ep_rews, 2))
-        avg_actor_loss = str(round(avg_actor_loss, 5))
+            self.stepInfo(True)
+            print('Game step', game_timestep, 'score %.1f' % score, 'avg score %.1f' % avg_score,
+                  'time_steps', n_steps, 'learning_steps', learn_iters)
+        self.save_models()
+        x = [i + 1 for i in range(len(score_history))]
+        self.plot_learning_curve(x, score_history, figure_file)
 
-        # Print logging statements
-        print(flush=True)
-        print(f"-------------------- Iteration #{i_so_far} --------------------", flush=True)
-        print(f"Average Episodic Length: {avg_ep_lens}", flush=True)
-        print(f"Average Episodic Return: {avg_ep_rews}", flush=True)
-        print(f"Average Loss: {avg_actor_loss}", flush=True)
-        print(f"Timesteps So Far: {t_so_far}", flush=True)
-        print(f"Iteration took: {delta_t} secs", flush=True)
-        print(f"------------------------------------------------------", flush=True)
-        print(flush=True)
+    def learn(self):
+        for _ in range(self.n_epochs):
+            state_arr, action_arr, old_prob_arr, vals_arr, \
+                reward_arr, dones_arr, batches = \
+                self.memory.generate_batches()
 
-        # Reset batch-specific logging data
-        self.logger['batch_lens'] = []
-        self.logger['batch_rews'] = []
-        self.logger['actor_losses'] = []
+            values = vals_arr
+            advantage = np.zeros(len(reward_arr), dtype=np.float32)
+
+            for t in range(len(reward_arr) - 1):
+                discount = 1
+                a_t = 0
+                for k in range(t, len(reward_arr) - 1):
+                    a_t += discount * (reward_arr[k] + self.gamma * values[k + 1] * (1 - int(dones_arr[k])) - values[k])
+                    discount *= self.gamma * self.gae_lambda
+                advantage[t] = a_t
+            advantage = torch.tensor(advantage).to(self.actor.device)
+
+            values = torch.tensor(values).to(self.actor.device)
+            for batch in batches:
+                #states = torch.tensor(state_arr[batch], dtype=torch.float).to(self.actor.device)
+                old_probs = torch.tensor(old_prob_arr[batch]).to(self.actor.device)
+                actions = torch.tensor(action_arr[batch]).to(self.actor.device)
+
+                dist, critic_value = self.actor(state_arr[batch])
+
+                critic_value = torch.squeeze(critic_value)
+
+                new_probs = dist.log_prob(actions).sum()
+                prob_ratio = new_probs.exp() / old_probs.exp()
+                # prob_ratio = (new_probs - old_probs).exp()
+                weighted_probs = advantage[batch] * prob_ratio
+                weighted_clipped_probs = torch.clamp(prob_ratio, 1 - self.policy_clip,
+                                                     1 + self.policy_clip) * advantage[batch]
+                actor_loss = -torch.min(weighted_probs, weighted_clipped_probs).mean()
+
+                returns = advantage[batch] + values[batch]
+                critic_loss = (returns - critic_value) ** 2
+                critic_loss = critic_loss.mean()
+
+                total_loss = actor_loss + 0.5 * critic_loss
+                self.actor.optimizer.zero_grad()
+                total_loss.backward()
+                self.actor.optimizer.step()
+
+        self.memory.clear_memory()
+
+    @staticmethod
+    def plot_learning_curve(x, scores, figure_file):
+        running_avg = np.zeros(len(scores))
+        for i in range(len(running_avg)):
+            running_avg[i] = np.mean(scores[max(0, i - 100):(i + 1)])
+        plt.plot(x, running_avg)
+        plt.title('Running average of previous 100 scores')
+        plt.savefig(figure_file)
+
+    def getScaledAction(self, action):
+        act = action.squeeze(dim=0)[0].cpu()
+        pr_idx = torch.round(torch.tanh(act) + 1).int().item()
+        w, h = self.obsInfo["chosenStock"][pr_idx][1], self.obsInfo["chosenStock"][pr_idx][2]
+        action_max = torch.tensor([2, w - 1, h - 1], dtype=torch.int).to(self.device)
+        action_min = torch.tensor([0, 0, 0], dtype=torch.int).to(self.device)
+        bounded_act = torch.tanh(action)
+        scaled_act = action_min + (bounded_act + 1) * 0.5 * (action_max - action_min)
+        return torch.round(scaled_act).int()
+
+    def initCustomObs(self, obs):
+        self.customObs = []
+        chosen_product = []  # idx, w, h, quantity
+        product_area = 0
+        for product in self.obsInfo["productInfo"]:
+            if product[3] > 0:
+                chosen_product = [product[0], product[1], product[2], product[3]]
+                product_area = product[1] * product[2]
+                break
+        if len(chosen_product) == 0:
+            chosen_product = [0, 0, 0, 0]
+        chosen_stock = []  # 3 stocks - [i,w,h]
+        for stock in self.obsInfo["stockInfo"]:
+            w, h = stock[1:3]
+            empty_area = np.count_nonzero(obs["stocks"][stock[0]] == -1)
+            if empty_area >= product_area:
+                self.customObs.append(obs["stocks"][stock[0]][:w, :h])
+                chosen_stock.append([stock[0], w, h])
+            if len(chosen_stock) >= 3:
+                break
+        if chosen_stock[-1] not in self.obsInfo["intact"]:
+            for i in self.obsInfo["intact"]:
+                area = np.count_nonzero(obs["stocks"][i] == -1)
+                if i not in chosen_stock and area >= product_area:
+                    w = np.count_nonzero(obs["stocks"][i][:, 0] > -2)
+                    h = np.count_nonzero(obs["stocks"][i][0, :] > -2)
+                    self.customObs[-1] = obs["stocks"][i][:w, :h]
+                    chosen_stock[-1] = [i, w, h]
+                    break
+        while len(chosen_stock) < 3:
+            chosen_stock.append([0, 0, 0])
+        self.customObs.append([chosen_product[1], chosen_product[2]])
+        self.obsInfo["chosenStock"] = chosen_stock
+        self.obsInfo["chosenProduct"] = chosen_product
 
     def resetCustomObservation(self, obs):
-        stocksInfo = []
-        for stock in obs["stocks"]:
-            width = self.min_w
-            for i in range(self.min_w, self.max_w):
-                if stock[i, 0] == -1:
-                    width += 1
-                else:
-                    break
-            height = self.min_h
-            for i in range(self.min_h, self.max_h):
-                if stock[0, i] == -1:
-                    height += 1
-                else:
-                    break
-            stocksInfo.append(width)
-            stocksInfo.append(height)
-
-        productInfo = []
-        for product in obs["products"]:
-            productInfo.append(int(product["size"][0]))
-            productInfo.append(int(product["size"][1]))
-            productInfo.append(product["quantity"])
-        for _ in range(self.max_product_type - len(obs["products"])):
-            productInfo += [-1, -1, -1]
-        lastMoves = []
-        for _ in range(self.max_product_per_type*self.max_product_type):
-            lastMoves += [-1, -1, -1, -1]
-        self.customObs = stocksInfo + productInfo + lastMoves
+        stocksInfo = []  # idx, w, h
+        for i, stock in enumerate(obs["stocks"]):
+            w = np.count_nonzero(stock[:, 0] > -2)
+            h = np.count_nonzero(stock[0, :] > -2)
+            stocksInfo.append([i, w, h])
+        productInfo = []  # idx, w, h, quantity
+        for i, product in enumerate(obs["products"]):
+            productInfo.append([i, int(product["size"][0]), int(product["size"][1]), product["quantity"]])
+        sorted_stock = sorted(stocksInfo, key=lambda x: x[1] * x[2])
+        sorted_product = sorted(productInfo, key=lambda x: x[1] * x[2], reverse=True)
+        intactStock = [stock[0] for stock in sorted_stock]
+        self.obsInfo = {"stockInfo": sorted_stock, "productInfo": sorted_product, "stockCount": len(sorted_stock)
+            , "productCount": len(sorted_product), "intact": intactStock, "chosenStock": [], "chosenProduct": []}
+        self.initCustomObs(obs)
 
     def updateCustomObservation(self, newObs, action):
-        width, height = self.customObs[200 + action[1]*3], self.customObs[201 + action[1]*3]
-        if width <= 0 or height <= 0:
-            return
+        action = np.array(action.squeeze(dim=0).cpu())
+        productIdx = self.obsInfo["chosenProduct"][0]
+        stockIdx = self.obsInfo["chosenStock"][action[0]][0]
         update = False
         for i, product in enumerate(newObs["products"]):
-            if int(product["size"][0]) == width and int(product["size"][1]) == height:
-                prevQuantity = self.customObs[202+i*3]
+            if i == productIdx:
+                prevQuantity = self.obsInfo["chosenProduct"][3]
                 newQuantity = product["quantity"]
-                if prevQuantity != newQuantity:
+                if prevQuantity > newQuantity:
                     update = True
-                    self.customObs[202 + i * 3] = newQuantity
                     break
         if not update:
             return
-        start, step = 275, 4
-        for i in range(500):
-            if self.customObs[start+i*step] == -1:
-                self.customObs[start + i * step:start + step + i * step] = action
+        for i, product in enumerate(self.obsInfo["productInfo"]):
+            if product[0] == productIdx:
+                self.obsInfo["productInfo"][i][3] -= 1
                 break
+        if stockIdx in self.obsInfo["intact"]:
+            self.obsInfo["intact"].remove(stockIdx)
+        self.initCustomObs(newObs)
 
     def convertAction(self, action):
-        width, height = self.customObs[200 + action[1]*3], self.customObs[201 + action[1]*3]
-        return {"stock_idx": action[0], "size": np.array([width,height]), "position": (action[2], action[3])}
+        action = np.array(action.squeeze(dim=0).cpu())
+        stockIdx = self.obsInfo["chosenStock"][action[0]][0]
+        width, height = self.obsInfo["chosenProduct"][1], self.obsInfo["chosenProduct"][2]
+        return {"stock_idx": stockIdx, "size": np.array([width, height]), "position": (action[1], action[2])}
 
-    def getCustomReward(self,obs,action):
-        width, height = self.customObs[200 + action[1] * 3], self.customObs[201 + action[1] * 3]
-        quantity = self.customObs[202 + action[1] * 3]
-        stockIdx, x, y = action[0], action[2], action[3]
-        if width <= 0 or height <= 0 or quantity <= 0:
-            return -10
+    def getCustomReward(self, obs, action):
+        action = np.array(action.squeeze(dim=0).cpu())
+        width, height = self.obsInfo["chosenProduct"][1], self.obsInfo["chosenProduct"][2]
+        stockIdx, x, y = self.obsInfo["chosenStock"][action[0]][0], action[1], action[2]
         stock = obs["stocks"][stockIdx]
-        stockWidth, stockHeight = self.customObs[stockIdx*2], self.customObs[1 + stockIdx*2]
+        stockWidth, stockHeight = self.obsInfo["chosenStock"][action[0]][1:]
         if x + width > stockWidth or y + height > stockHeight:
-            return -5
+            return -1, False
         if not (np.all(stock[x: x + width, y: y + height] == -1)):
-            return -5
-        if stockIdx > 0:
-            lastWaste = np.count_nonzero(obs["stocks"][stockIdx-1] == -1)
-            if lastWaste >= width*height:
-                return -10
+            return -1, False
+        reward = 5
         if x > 0:
-            if stock[x-1, y] == -1:
-                return -1
+            if stock[x - 1, y] == -1:
+                reward = -0.1
         if y > 0:
-            if stock[x, y-1] == -1:
-                return -1
+            if stock[x, y - 1] == -1:
+                reward = -0.1
         if x > 0 and y > 0:
-            if stock[x-1, y-1] == -1:
-                return -1
-        remainQuantity = 0
-        for i in range(25):
-            q = self.customObs[202 + i*3]
-            if q > 0: remainQuantity += q
-        if remainQuantity == 0: return 100
-        return 10
-
+            if stock[x - 1, y - 1] == -1:
+                reward = -0.1
+        if action[0] > 0:
+            idx = self.obsInfo["chosenStock"][action[0] - 1][0]
+            lastWaste = np.count_nonzero(obs["stocks"][idx] == -1)
+            if lastWaste >= width * height:
+                reward = -0.3
+        remain = 0
+        done = False
+        for product in obs["products"]:
+            remain += product["quantity"]
+        if remain == 1:
+            # print('done')
+            done = True
+            reward += 10
+        return reward, done
