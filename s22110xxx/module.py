@@ -7,7 +7,7 @@ from torch.distributions import Categorical
 
 
 class FilterCNN(nn.Module):
-    def __init__(self, out_dim=64):
+    def __init__(self, out_dim=3):
         super(FilterCNN, self).__init__()
         self.conv1 = nn.Conv2d(3, out_dim, kernel_size=1)
         self.bn1 = nn.LazyBatchNorm2d()
@@ -26,17 +26,12 @@ class FilterCNN(nn.Module):
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, n_actions, filter_out, alpha, chkpt_dir='./s22110xxx/models'):
+    def __init__(self, filter_out, alpha, chkpt_dir='./s22110xxx/models'):
         super(ActorCritic, self).__init__()
         self.checkpoint_file = os.path.join(chkpt_dir, 'ac_torch_ppo1')
         if not os.path.exists(self.checkpoint_file):
             self.checkpoint_file = os.path.join('./models', 'ac_torch_ppo1')
         self.actor = nn.Conv2d(1, 1, kernel_size=1)
-        self.critic = nn.Sequential(
-            nn.LazyLinear(out_features=128),
-            nn.ReLU(),
-            nn.LazyLinear(out_features=1),
-        )
         self.filter = FilterCNN(filter_out)
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -50,8 +45,8 @@ class ActorCritic(nn.Module):
         x = torch.flatten(x, start_dim=-3)
         x = torch.softmax(x, dim=-1)
         dist = Categorical(x)
-        f = torch.flatten(f, start_dim=-3)
-        value = self.critic(f)
+        #f = torch.flatten(f, start_dim=-3)
+        value = torch.max(f)
         return dist, value
 
     def save_checkpoint(self):
