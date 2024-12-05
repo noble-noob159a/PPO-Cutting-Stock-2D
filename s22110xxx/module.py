@@ -26,7 +26,7 @@ class FilterCNN(nn.Module):
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, n_actions, filter_out, alpha, chkpt_dir='./models'):
+    def __init__(self, n_actions, filter_out, alpha, chkpt_dir='./s22110xxx/models'):
         super(ActorCritic, self).__init__()
 
         self.checkpoint_file = os.path.join(chkpt_dir, 'ac_torch_ppo1')
