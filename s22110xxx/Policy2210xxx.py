@@ -2,7 +2,7 @@ from s22110xxx.module import *
 import numpy as np
 import matplotlib.pyplot as plt
 from policy import Policy
-from torch.utils.tensorboard import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 
 
 class Policy2210xxx(Policy):
@@ -23,7 +23,7 @@ class Policy2210xxx(Policy):
         self.actor = ActorCritic(self.n_actions, self.filter_out, self.leaning_rate)
         # self.critic = CriticNetwork(self.filter_out,self.leaning_rate)
         self.env = env
-        self.writer = SummaryWriter('log/PPO_no_linear')
+        #self.writer = SummaryWriter('log/PPO_no_linear')
         if load_check_pontis or env is None:
             self.actor.load_checkpoint()
             # self.critic.load_checkpoint()
