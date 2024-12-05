@@ -1,5 +1,5 @@
 import gymnasium as gym
-from Policy2210xxx import *
+from s22110xxx.policy2210xxx import Policy2210xxx
 import gym_cutting_stock
 
 
