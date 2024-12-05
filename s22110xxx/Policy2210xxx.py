@@ -63,7 +63,7 @@ class PPO:
     def get_action(self, obs, info):
         if len(self.customObs) == 0:
             self.resetCustomObservation(obs)
-            self.stepInfo()
+            #self.stepInfo()
         else:
             self.updateCustomObservation(obs, self.old_action)
         with torch.no_grad():
