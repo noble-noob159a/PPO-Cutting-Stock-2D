@@ -5,11 +5,7 @@ from policy import Policy
 from torch.utils.tensorboard import SummaryWriter
 
 
-def Policy2210xxx(Policy):
-    pass
-
-
-class PPO:
+class Policy2210xxx(Policy):
     def __init__(self, env=None, load_check_pontis=False):
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.gamma = 0.99
@@ -50,7 +46,6 @@ class PPO:
     def choose_action(self, observation):
         observation = np.array([observation], dtype=float)
         state = torch.tensor(observation, dtype=torch.float).to(self.actor.device)
-        #print(state.shape)
         dist, value = self.actor(state)
         # value = self.critic([observation])
         action = dist.sample()
@@ -71,7 +66,6 @@ class PPO:
             state = torch.tensor(state, dtype=torch.float).to(self.actor.device)
             dist, value = self.actor(state)
             action = torch.argmax(dist.probs).item()
-        #scaledAction = self.getScaledAction(action)
         convertedAction = self.convertAction(action)
         reward, done = self.getCustomReward(obs, action)
         self.old_action = action
@@ -188,7 +182,6 @@ class PPO:
                 # self.critic.optimizer.step()
         self.memory.clear_memory()
 
-
     @staticmethod
     def plot_learning_curve(x, scores, figure_file):
         running_avg = np.zeros(len(scores))
@@ -199,7 +192,7 @@ class PPO:
         plt.savefig(figure_file)
 
     @staticmethod
-    def _can_place_(stock, stock_size, prod_size):
+    def can_place(stock, stock_size, prod_size):
         stock_w, stock_h = stock_size
         prod_w, prod_h = prod_size
         res = False
@@ -233,7 +226,7 @@ class PPO:
             w, h = obs["stocks"][stock[0]].shape
             if stock[3] < product_size[0] * product_size[1]:
                 continue
-            can_place, mask, bias = self._can_place_(obs["stocks"][stock[0]], (w, h), product_size)
+            can_place, mask, bias = self.can_place(obs["stocks"][stock[0]], (w, h), product_size)
             if can_place:
                 chosen_stock.append([stock[0], w, h])
                 output_mask = mask
@@ -269,7 +262,7 @@ class PPO:
             w, h, quantity = int(product["size"][0]), int(product["size"][1]), product["quantity"]
             productInfo.append([i, w, h, quantity])
         sorted_stock = stocksInfo
-        sorted_product = sorted(productInfo,key=lambda x:x[1]*x[2],reverse=True)
+        sorted_product = sorted(productInfo, key=lambda x: x[1] * x[2], reverse=True)
         intactStock = [stock[0] for stock in sorted_stock]
         self.obsInfo = {"stockInfo": sorted_stock, "productInfo": sorted_product, "intact": intactStock,
                         "chosenStock": [], "chosenProduct": []}
@@ -311,13 +304,13 @@ class PPO:
         if x > 0 or y > 0:
             if x > 0 and y > 0:
                 if stock[x - 1, y - 1] == -1:
-                    reward = -1*x - 1*y
+                    reward = -1 * x - 1 * y
             elif x > 0:
                 if stock[x - 1, y] == -1:
-                    reward = -1*x
+                    reward = -1 * x
             elif y > 0:
                 if stock[x, y - 1] == -1:
-                    reward = -1*y
+                    reward = -1 * y
         remain = 0
         done = False
         for product in obs["products"]:
@@ -325,4 +318,4 @@ class PPO:
         if remain == 1:
             done = True
             #reward += 10
-        return reward/10, done
+        return reward / 10, done
