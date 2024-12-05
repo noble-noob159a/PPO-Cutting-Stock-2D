@@ -187,6 +187,8 @@ class PPO:
                 self.actor.optimizer.step()
                 # self.critic.optimizer.step()
         self.memory.clear_memory()
+
+
     @staticmethod
     def plot_learning_curve(x, scores, figure_file):
         running_avg = np.zeros(len(scores))
@@ -195,16 +197,6 @@ class PPO:
         plt.plot(x, running_avg)
         plt.title('Running average of previous 100 scores')
         plt.savefig(figure_file)
-
-    def getScaledAction(self, action):
-        w, h = self.obsInfo["chosenStock"][1], self.obsInfo["chosenStock"][2]
-        p_w, p_h = self.obsInfo["chosenProduct"][1], self.obsInfo["chosenProduct"][2]
-        action_max = torch.tensor([1, w * h - 1], dtype=torch.int).to(self.device)
-        action_min = torch.tensor([0, 0], dtype=torch.int).to(self.device)
-        bounded_act = torch.tanh(action)
-        scaled_act = action_min + (bounded_act + 1) * 0.5 * (action_max - action_min)
-        scaled_act = torch.round(scaled_act).int()
-        return scaled_act
 
     @staticmethod
     def _can_place_(stock, stock_size, prod_size):
