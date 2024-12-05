@@ -13,7 +13,7 @@ env = gym.make(
     render_mode=render,  # Comment this line to disable rendering
 )
 train_env = None if test_mode else env
-agent = PPO(train_env,load_check_point)
+agent = Policy2210xxx(train_env,load_check_point)
 if not test_mode:
     agent.train(total_timestep=100_000)
 else:
