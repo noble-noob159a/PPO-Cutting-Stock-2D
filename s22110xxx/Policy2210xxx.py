@@ -121,11 +121,7 @@ class PPO:
                 self.remember(self.customObs, action, prob, val, reward, done)
                 self.updateCustomObservation(observation_, action)
                 if n_steps % self.rollout_steps == 0:
-                    log_loss = self.learn()
-                    log_loss = [l / (self.n_epochs * (self.rollout_steps // self.batch_size)) for l in log_loss]
-                    #self.writer.add_scalar('total_loss',log_loss[0],learn_iters)
-                    #self.writer.add_scalar('actor_loss', log_loss[1], learn_iters)
-                    #self.writer.add_scalar('critic_loss', log_loss[2], learn_iters)
+                    self.learn()
                     learn_iters += 1
                 observation = observation_
             score_history.append(score)
@@ -145,7 +141,6 @@ class PPO:
         self.plot_learning_curve(x, score_history, figure_file)
 
     def learn(self):
-        log_loss = [0, 0, 0]
         for _ in range(self.n_epochs):
             state_arr, action_arr, old_prob_arr, vals_arr, \
                 reward_arr, dones_arr, batches = \
@@ -191,11 +186,7 @@ class PPO:
                 total_loss.backward()
                 self.actor.optimizer.step()
                 # self.critic.optimizer.step()
-                log_loss = [log_loss[0] + total_loss.item(), log_loss[1] + actor_loss.item(),
-                            log_loss[2] + critic_loss.item()]
         self.memory.clear_memory()
-        return log_loss
-
     @staticmethod
     def plot_learning_curve(x, scores, figure_file):
         running_avg = np.zeros(len(scores))
