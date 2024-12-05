@@ -1,8 +1,8 @@
-import torch
-from module import *
+from s22110xxx.module import *
 import numpy as np
 import matplotlib.pyplot as plt
 from policy import Policy
+from torch.utils.tensorboard import SummaryWriter
 
 
 def Policy2210xxx(Policy):
@@ -14,18 +14,20 @@ class PPO:
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.gamma = 0.99
         self.policy_clip = 0.2
-        self.n_epochs = 15
+        self.n_epochs = 5
         self.gae_lambda = 0.95
         self.rollout_steps = 50  # N - big batch
         self.batch_size = 10
-        self.leaning_rate = 0.1
+        self.leaning_rate = 0.0003
 
         self.customObs = []
         self.obsInfo = dict()
-        self.filter_out = 256
-        self.n_actions = 3  # [stock idx, x, y]
-        self.actor = ActorNetwork(self.n_actions, self.filter_out, self.leaning_rate)
+        self.filter_out = 1
+        self.n_actions = 100 * 100  # [x * y]
+        self.actor = ActorCritic(self.n_actions, self.filter_out, self.leaning_rate)
+        # self.critic = CriticNetwork(self.filter_out,self.leaning_rate)
         self.env = env
+        self.writer = SummaryWriter('log/PPO_no_linear')
         if load_check_pontis or env is None:
             self.actor.load_checkpoint()
             # self.critic.load_checkpoint()
@@ -46,10 +48,15 @@ class PPO:
         # self.critic.load_checkpoint()
 
     def choose_action(self, observation):
-        # state = torch.tensor([observation], dtype=torch.float).to(self.actor.device)
-        dist, value = self.actor([observation])
+        observation = np.array([observation], dtype=float)
+        state = torch.tensor(observation, dtype=torch.float).to(self.actor.device)
+        #print(state.shape)
+        dist, value = self.actor(state)
+        # value = self.critic([observation])
         action = dist.sample()
-        probs = torch.squeeze(dist.log_prob(action).sum()).item()
+
+        probs = torch.squeeze(dist.log_prob(action)).item()
+        action = torch.squeeze(action).item()
         value = torch.squeeze(value).item()
         return action, probs, value
 
@@ -60,13 +67,14 @@ class PPO:
         else:
             self.updateCustomObservation(obs, self.old_action)
         with torch.no_grad():
-            #state = torch.tensor([self.customObs], dtype=torch.float).to(self.actor.device)
-            dist, val = self.actor([self.customObs])
-            action = dist.sample()
-        scaledAction = self.getScaledAction(action)
-        convertedAction = self.convertAction(scaledAction)
-        reward, done = self.getCustomReward(obs, scaledAction)
-        self.old_action = scaledAction
+            state = np.array([self.customObs], dtype=float)
+            state = torch.tensor(state, dtype=torch.float).to(self.actor.device)
+            dist, value = self.actor(state)
+            action = torch.argmax(dist.probs).item()
+        #scaledAction = self.getScaledAction(action)
+        convertedAction = self.convertAction(action)
+        reward, done = self.getCustomReward(obs, action)
+        self.old_action = action
         if done:
             self.customObs = []
         return convertedAction
@@ -76,21 +84,22 @@ class PPO:
         for p in self.obsInfo["productInfo"]:
             count += 1
             quantity += p[3]
-
         if postInfo:
             print(f'Remaining products: {quantity}, intactStock: {len(self.obsInfo["intact"])}')
         else:
             print(f'---------------------------------------',
-                  f'\nTotal product types: {count}, products demand: {quantity}')
+                  f'\nTotal product types: {count}, products demand: {quantity}, ')
+            # f'total product area: {self.obsInfo["productArea"]}, total product area: {self.obsInfo["stockArea"]}')
 
-    def train(self, total_timestep, timestep_per_game=2_000):
+    def train(self, total_timestep, timestep_per_game=200):
         figure_file = 'rewards.png'
         best_score = -10000
         score_history = []
         learn_iters = 0
         avg_score = 0
         n_steps = 0
-
+        save_freq = total_timestep // 10
+        cur_save_step = save_freq
         while n_steps < total_timestep:
             observation, _ = self.env.reset()
             self.resetCustomObservation(observation)
@@ -99,40 +108,44 @@ class PPO:
             score = 0
             game_timestep = 0
             self.stepInfo()
-            while game_timestep < timestep_per_game and (not done):
+            while not done:
                 action, prob, val = self.choose_action(self.customObs)
-                scaledAction = self.getScaledAction(action)
-                convertedAction = self.convertAction(scaledAction)
-                reward, _ = self.getCustomReward(observation, scaledAction)
+                # scaledAction = self.getScaledAction(action)
+                convertedAction = self.convertAction(action)
+                reward, _ = self.getCustomReward(observation, action)
                 observation_, _, done, _, info = self.env.step(convertedAction)
 
                 n_steps += 1
                 game_timestep += 1
                 score += reward
                 self.remember(self.customObs, action, prob, val, reward, done)
-                self.updateCustomObservation(observation_, scaledAction)
+                self.updateCustomObservation(observation_, action)
                 if n_steps % self.rollout_steps == 0:
-                    self.learn()
+                    log_loss = self.learn()
+                    log_loss = [l / (self.n_epochs * (self.rollout_steps // self.batch_size)) for l in log_loss]
+                    #self.writer.add_scalar('total_loss',log_loss[0],learn_iters)
+                    #self.writer.add_scalar('actor_loss', log_loss[1], learn_iters)
+                    #self.writer.add_scalar('critic_loss', log_loss[2], learn_iters)
                     learn_iters += 1
                 observation = observation_
-                if n_steps % 1000 == 0:
-                    print("done step ", n_steps)
-                    self.stepInfo(True)
             score_history.append(score)
             avg_score = np.mean(score_history[-100:])
             normalized_reward = score / game_timestep
             if normalized_reward > best_score:
                 best_score = normalized_reward
                 self.save_models()
-
+            if n_steps > cur_save_step:
+                cur_save_step += save_freq
+                self.save_models()
             self.stepInfo(True)
             print('Game step', game_timestep, 'score %.1f' % score, 'avg score %.1f' % avg_score,
                   'time_steps', n_steps, 'learning_steps', learn_iters)
-        self.save_models()
         x = [i + 1 for i in range(len(score_history))]
+        self.save_models()
         self.plot_learning_curve(x, score_history, figure_file)
 
     def learn(self):
+        log_loss = [0, 0, 0]
         for _ in range(self.n_epochs):
             state_arr, action_arr, old_prob_arr, vals_arr, \
                 reward_arr, dones_arr, batches = \
@@ -152,15 +165,15 @@ class PPO:
 
             values = torch.tensor(values).to(self.actor.device)
             for batch in batches:
-                #states = torch.tensor(state_arr[batch], dtype=torch.float).to(self.actor.device)
+                states = torch.tensor(state_arr[batch], dtype=torch.float).to(self.actor.device)
                 old_probs = torch.tensor(old_prob_arr[batch]).to(self.actor.device)
                 actions = torch.tensor(action_arr[batch]).to(self.actor.device)
 
-                dist, critic_value = self.actor(state_arr[batch])
-
+                dist, critic_value = self.actor(states)
+                #critic_value = self.critic(state_arr[batch])
                 critic_value = torch.squeeze(critic_value)
 
-                new_probs = dist.log_prob(actions).sum()
+                new_probs = dist.log_prob(actions)
                 prob_ratio = new_probs.exp() / old_probs.exp()
                 # prob_ratio = (new_probs - old_probs).exp()
                 weighted_probs = advantage[batch] * prob_ratio
@@ -174,10 +187,14 @@ class PPO:
 
                 total_loss = actor_loss + 0.5 * critic_loss
                 self.actor.optimizer.zero_grad()
+                # self.critic.optimizer.zero_grad()
                 total_loss.backward()
                 self.actor.optimizer.step()
-
+                # self.critic.optimizer.step()
+                log_loss = [log_loss[0] + total_loss.item(), log_loss[1] + actor_loss.item(),
+                            log_loss[2] + critic_loss.item()]
         self.memory.clear_memory()
+        return log_loss
 
     @staticmethod
     def plot_learning_curve(x, scores, figure_file):
@@ -189,125 +206,140 @@ class PPO:
         plt.savefig(figure_file)
 
     def getScaledAction(self, action):
-        act = action.squeeze(dim=0)[0].cpu()
-        pr_idx = torch.round(torch.tanh(act) + 1).int().item()
-        w, h = self.obsInfo["chosenStock"][pr_idx][1], self.obsInfo["chosenStock"][pr_idx][2]
-        action_max = torch.tensor([2, w - 1, h - 1], dtype=torch.int).to(self.device)
-        action_min = torch.tensor([0, 0, 0], dtype=torch.int).to(self.device)
+        w, h = self.obsInfo["chosenStock"][1], self.obsInfo["chosenStock"][2]
+        p_w, p_h = self.obsInfo["chosenProduct"][1], self.obsInfo["chosenProduct"][2]
+        action_max = torch.tensor([1, w * h - 1], dtype=torch.int).to(self.device)
+        action_min = torch.tensor([0, 0], dtype=torch.int).to(self.device)
         bounded_act = torch.tanh(action)
         scaled_act = action_min + (bounded_act + 1) * 0.5 * (action_max - action_min)
-        return torch.round(scaled_act).int()
+        scaled_act = torch.round(scaled_act).int()
+        return scaled_act
+
+    @staticmethod
+    def _can_place_(stock, stock_size, prod_size):
+        stock_w, stock_h = stock_size
+        prod_w, prod_h = prod_size
+        res = False
+        mask = np.zeros((stock_w, stock_h), dtype=int)
+        bias_mask = np.zeros(stock_size, dtype=float)
+        bias_mask.fill(-stock_w - stock_h)
+        if prod_h == prod_w == 0:
+            return False, mask, bias_mask
+        for x in range(stock_w - prod_w + 1):
+            for y in range(stock_h - prod_h + 1):
+                if np.all(stock[x: x + prod_w, y: y + prod_h] == -1):
+                    mask[x, y] = 1
+                    bias_mask[x, y] = (stock_w + stock_h - x - y)
+                    res = True
+        return res, mask, bias_mask
 
     def initCustomObs(self, obs):
         self.customObs = []
-        chosen_product = []  # idx, w, h, quantity
-        product_area = 0
+        next_product = []  # idx, w, h, quantity
         for product in self.obsInfo["productInfo"]:
             if product[3] > 0:
-                chosen_product = [product[0], product[1], product[2], product[3]]
-                product_area = product[1] * product[2]
+                next_product.append([product[0], product[1], product[2], product[3]])
                 break
-        if len(chosen_product) == 0:
-            chosen_product = [0, 0, 0, 0]
-        chosen_stock = []  # 3 stocks - [i,w,h]
+        while len(next_product) < 1:
+            next_product.append([0, 0, 0, 0])
+        chosen_stock = []  # 1 stocks - [i,w,h]
+        output_mask = None
+        bias_mask = None
+        product_size = [next_product[0][1], next_product[0][2]]
         for stock in self.obsInfo["stockInfo"]:
-            w, h = stock[1:3]
-            empty_area = np.count_nonzero(obs["stocks"][stock[0]] == -1)
-            if empty_area >= product_area:
-                self.customObs.append(obs["stocks"][stock[0]][:w, :h])
+            w, h = obs["stocks"][stock[0]].shape
+            if stock[3] < product_size[0] * product_size[1]:
+                continue
+            can_place, mask, bias = self._can_place_(obs["stocks"][stock[0]], (w, h), product_size)
+            if can_place:
                 chosen_stock.append([stock[0], w, h])
-            if len(chosen_stock) >= 3:
+                output_mask = mask
+                bias_mask = bias
                 break
-        if chosen_stock[-1] not in self.obsInfo["intact"]:
-            for i in self.obsInfo["intact"]:
-                area = np.count_nonzero(obs["stocks"][i] == -1)
-                if i not in chosen_stock and area >= product_area:
-                    w = np.count_nonzero(obs["stocks"][i][:, 0] > -2)
-                    h = np.count_nonzero(obs["stocks"][i][0, :] > -2)
-                    self.customObs[-1] = obs["stocks"][i][:w, :h]
-                    chosen_stock[-1] = [i, w, h]
-                    break
-        while len(chosen_stock) < 3:
-            chosen_stock.append([0, 0, 0])
-        self.customObs.append([chosen_product[1], chosen_product[2]])
-        self.obsInfo["chosenStock"] = chosen_stock
+        while len(chosen_stock) < 1:
+            chosen_stock.append([-1, -1, -1])
+        for stock in chosen_stock:
+            if stock[0] > -1:
+                s = obs["stocks"][stock[0]][:stock[1], :stock[2]].copy()
+                s[s != -1] = 0
+                s[s == -1] = 1
+                self.customObs.append(s)
+            else:
+                s = np.full(shape=(15, 15), fill_value=0, dtype=int)
+                self.customObs.append(s)
+        chosen_product = next_product[0]
+        self.customObs.append(bias_mask)
+        self.customObs.append(output_mask)
+        self.obsInfo["chosenStock"] = chosen_stock[0]
         self.obsInfo["chosenProduct"] = chosen_product
+        #print(chosen_stock)
 
     def resetCustomObservation(self, obs):
-        stocksInfo = []  # idx, w, h
+        stocksInfo = []  # idx, w, h, fill_ratio
+        stockArea = productArea = 0
         for i, stock in enumerate(obs["stocks"]):
             w = np.count_nonzero(stock[:, 0] > -2)
             h = np.count_nonzero(stock[0, :] > -2)
-            stocksInfo.append([i, w, h])
+            stocksInfo.append([i, w, h, w * h])
         productInfo = []  # idx, w, h, quantity
         for i, product in enumerate(obs["products"]):
-            productInfo.append([i, int(product["size"][0]), int(product["size"][1]), product["quantity"]])
-        sorted_stock = sorted(stocksInfo, key=lambda x: x[1] * x[2])
-        sorted_product = sorted(productInfo, key=lambda x: x[1] * x[2], reverse=True)
+            w, h, quantity = int(product["size"][0]), int(product["size"][1]), product["quantity"]
+            productInfo.append([i, w, h, quantity])
+        sorted_stock = stocksInfo
+        sorted_product = sorted(productInfo,key=lambda x:x[1]*x[2],reverse=True)
         intactStock = [stock[0] for stock in sorted_stock]
-        self.obsInfo = {"stockInfo": sorted_stock, "productInfo": sorted_product, "stockCount": len(sorted_stock)
-            , "productCount": len(sorted_product), "intact": intactStock, "chosenStock": [], "chosenProduct": []}
+        self.obsInfo = {"stockInfo": sorted_stock, "productInfo": sorted_product, "intact": intactStock,
+                        "chosenStock": [], "chosenProduct": []}
         self.initCustomObs(obs)
 
     def updateCustomObservation(self, newObs, action):
-        action = np.array(action.squeeze(dim=0).cpu())
+        # action = np.array(action.squeeze(dim=0).cpu())
         productIdx = self.obsInfo["chosenProduct"][0]
-        stockIdx = self.obsInfo["chosenStock"][action[0]][0]
-        update = False
-        for i, product in enumerate(newObs["products"]):
-            if i == productIdx:
-                prevQuantity = self.obsInfo["chosenProduct"][3]
-                newQuantity = product["quantity"]
-                if prevQuantity > newQuantity:
-                    update = True
-                    break
-        if not update:
-            return
+        stockIdx = self.obsInfo["chosenStock"][0]
         for i, product in enumerate(self.obsInfo["productInfo"]):
             if product[0] == productIdx:
                 self.obsInfo["productInfo"][i][3] -= 1
+                break
+        for i, stock in enumerate(self.obsInfo["stockInfo"]):
+            if stock[0] == stockIdx:
+                w, h = newObs["products"][productIdx]["size"]
+                self.obsInfo["stockInfo"][i][3] -= w * h
                 break
         if stockIdx in self.obsInfo["intact"]:
             self.obsInfo["intact"].remove(stockIdx)
         self.initCustomObs(newObs)
 
     def convertAction(self, action):
-        action = np.array(action.squeeze(dim=0).cpu())
-        stockIdx = self.obsInfo["chosenStock"][action[0]][0]
+        stockIdx = self.obsInfo["chosenStock"][0]
+        w, h = self.obsInfo["chosenStock"][1], self.obsInfo["chosenStock"][2]
+        x, y = action // h, action % h
         width, height = self.obsInfo["chosenProduct"][1], self.obsInfo["chosenProduct"][2]
-        return {"stock_idx": stockIdx, "size": np.array([width, height]), "position": (action[1], action[2])}
+        return {"stock_idx": stockIdx, "size": np.array([width, height]), "position": (x, y)}
 
     def getCustomReward(self, obs, action):
-        action = np.array(action.squeeze(dim=0).cpu())
         width, height = self.obsInfo["chosenProduct"][1], self.obsInfo["chosenProduct"][2]
-        stockIdx, x, y = self.obsInfo["chosenStock"][action[0]][0], action[1], action[2]
+        stockIdx = self.obsInfo["chosenStock"][0]
+        if stockIdx < 0:
+            return -1, False
         stock = obs["stocks"][stockIdx]
-        stockWidth, stockHeight = self.obsInfo["chosenStock"][action[0]][1:]
-        if x + width > stockWidth or y + height > stockHeight:
-            return -1, False
-        if not (np.all(stock[x: x + width, y: y + height] == -1)):
-            return -1, False
-        reward = 5
-        if x > 0:
-            if stock[x - 1, y] == -1:
-                reward = -0.1
-        if y > 0:
-            if stock[x, y - 1] == -1:
-                reward = -0.1
-        if x > 0 and y > 0:
-            if stock[x - 1, y - 1] == -1:
-                reward = -0.1
-        if action[0] > 0:
-            idx = self.obsInfo["chosenStock"][action[0] - 1][0]
-            lastWaste = np.count_nonzero(obs["stocks"][idx] == -1)
-            if lastWaste >= width * height:
-                reward = -0.3
+        stockWidth, stockHeight = stock.shape
+        x, y = action // stockHeight, action % stockHeight
+        reward = (stockWidth + stockHeight - x - y)
+        if x > 0 or y > 0:
+            if x > 0 and y > 0:
+                if stock[x - 1, y - 1] == -1:
+                    reward = -1*x - 1*y
+            elif x > 0:
+                if stock[x - 1, y] == -1:
+                    reward = -1*x
+            elif y > 0:
+                if stock[x, y - 1] == -1:
+                    reward = -1*y
         remain = 0
         done = False
         for product in obs["products"]:
             remain += product["quantity"]
         if remain == 1:
-            # print('done')
             done = True
-            reward += 10
-        return reward, done
+            #reward += 10
+        return reward/10, done
