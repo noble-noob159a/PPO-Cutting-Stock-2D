@@ -19,8 +19,7 @@ class Policy2210xxx(Policy):
         self.customObs = []
         self.obsInfo = dict()
         self.filter_out = 1
-        self.n_actions = 100 * 100  # [x * y]
-        self.actor = ActorCritic(self.n_actions, self.filter_out, self.leaning_rate)
+        self.actor = ActorCritic(self.filter_out, self.leaning_rate)
         # self.critic = CriticNetwork(self.filter_out,self.leaning_rate)
         self.env = env
         #self.writer = SummaryWriter('log/PPO_no_linear')
