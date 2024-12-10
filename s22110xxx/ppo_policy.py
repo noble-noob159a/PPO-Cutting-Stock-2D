@@ -28,7 +28,7 @@ class PPO(Policy):
             self.actor.load_checkpoint()
             # self.critic.load_checkpoint()
         self.memory = PPOMemory(self.batch_size)
-        self.old_action = None  # for inference
+        #self.old_action = None  # for inference
 
     def remember(self, state, action, probs, vals, reward, done):
         self.memory.store_memory(state, action, probs, vals, reward, done)
@@ -60,7 +60,7 @@ class PPO(Policy):
             self.resetCustomObservation(obs)
             #self.stepInfo()
         else:
-            self.updateCustomObservation(obs, self.old_action)
+            self.updateCustomObservation(obs)
         with torch.no_grad():
             #print(self.customObs)
             state = np.array([self.customObs], dtype=float)
@@ -69,11 +69,9 @@ class PPO(Policy):
             action = torch.argmax(dist.probs).item()
         convertedAction = self.convertAction(obs, action)
         reward, done = self.getCustomReward(obs, action)
-        self.old_action = action
+        #self.old_action = action
         if done:
             self.customObs = []
-        #debug = [product[3] for product in self.obsInfo["productInfo"]]
-        #print("Debug info2: ", convertedAction["size"], obs["products"][self.obsInfo["chosenProduct"][0]])
         return convertedAction
 
     def stepInfo(self, postInfo=False):
@@ -116,7 +114,7 @@ class PPO(Policy):
                 game_timestep += 1
                 score += reward
                 self.remember(self.customObs, action, prob, val, reward, done)
-                self.updateCustomObservation(observation_, action)
+                self.updateCustomObservation(observation_)
                 if n_steps % self.rollout_steps == 0:
                     self.learn()
                     learn_iters += 1
@@ -283,7 +281,7 @@ class PPO(Policy):
                         "chosenStock": [], "chosenProduct": []}
         self.initCustomObs(obs)
 
-    def updateCustomObservation(self, newObs, oldOBS):
+    def updateCustomObservation(self, newObs):
         # action = np.array(action.squeeze(dim=0).cpu())
         productIdx = self.obsInfo["chosenProduct"][0]
         stockIdx = self.obsInfo["chosenStock"][0]
