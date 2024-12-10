@@ -1,3 +1,4 @@
+import random
 import gymnasium as gym
 import matplotlib as mpl
 import numpy as np
@@ -6,20 +7,25 @@ from gymnasium import spaces
 from matplotlib import colormaps
 
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+
+
 class CuttingStockEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 5}
 
     def __init__(
-        self,
-        render_mode=None,
-        min_w=50,
-        min_h=50,
-        max_w=100,
-        max_h=100,
-        num_stocks=100,
-        max_product_type=25,
-        max_product_per_type=20,
-        seed=42,
+            self,
+            render_mode=None,
+            min_w=50,
+            min_h=50,
+            max_w=100,
+            max_h=100,
+            num_stocks=100,
+            max_product_type=25,
+            max_product_per_type=20,
+            seed=42,
     ):
         self.seed = seed
         self.min_w = min_w
@@ -30,6 +36,9 @@ class CuttingStockEnv(gym.Env):
         self.max_product_type = max_product_type
         self.max_product_per_type = max_product_per_type
         self.cutted_stocks = np.full((num_stocks,), fill_value=0, dtype=int)
+
+        # Set seed explicitly
+        set_seed(seed)
 
         # Stocks space
         upper = np.full(
@@ -66,13 +75,13 @@ class CuttingStockEnv(gym.Env):
                     low=np.array([1, 1]),
                     high=np.array([max_w, max_h]),
                     shape=(2,),
-                    dtype=int
+                    dtype=int,
                 ),
                 "position": spaces.Box(
                     low=np.array([0, 0]),
                     high=np.array([max_w - 1, max_h - 1]),
                     shape=(2,),
-                    dtype=int
+                    dtype=int,
                 ),
             }
         )
@@ -98,13 +107,24 @@ class CuttingStockEnv(gym.Env):
         return {"stocks": self._stocks, "products": self._products}
 
     def _get_info(self):
-        #print("log", np.nonzero(self.cutted_stocks)[0].shape[0])
-        return {"cutted stocks": np.nonzero(self.cutted_stocks)[0].shape[0]}
-        #return {"filled_ratio": np.mean(self.cutted_stocks).item()}
+        filled_ratio = np.mean(self.cutted_stocks).item()
+        trim_loss = []
 
-    def reset(self, seed=None, options=None):
+        for sid, stock in enumerate(self._stocks):
+            if self.cutted_stocks[sid] == 0:
+                continue
+            tl = (stock == -1).sum() / (stock != -2).sum()
+            trim_loss.append(tl)
+
+        trim_loss = np.mean(trim_loss).item() if trim_loss else 1
+
+        return {"filled_ratio": filled_ratio, "trim_loss": trim_loss}
+
+    def reset(self, seed=42, options=None):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
+        set_seed(seed)
+
         self.cutted_stocks = np.full((self.num_stocks,), fill_value=0, dtype=int)
         self._stocks = []
 
@@ -115,7 +135,6 @@ class CuttingStockEnv(gym.Env):
             stock = np.full(shape=(self.max_w, self.max_h), fill_value=-2, dtype=int)
             stock[:width, :height] = -1  # Empty cells are marked as -1
             self._stocks.append(stock)
-            #print(f"[{width},{height}]",end='; ')
         self._stocks = tuple(self._stocks)
 
         # Randomize products
@@ -148,7 +167,9 @@ class CuttingStockEnv(gym.Env):
         # Check if the product is in the product list
         product_idx = None
         for i, product in enumerate(self._products):
-            if np.array_equal(product["size"], size):
+            if np.array_equal(product["size"], size) or np.array_equal(
+                    product["size"], size[::-1]
+            ):
                 if product["quantity"] == 0:
                     continue
 
@@ -162,16 +183,17 @@ class CuttingStockEnv(gym.Env):
                 stock_width = np.sum(np.any(stock != -2, axis=1))
                 stock_height = np.sum(np.any(stock != -2, axis=0))
                 if (
-                    x >= 0
-                    and y >= 0
-                    and x + width <= stock_width
-                    and y + height <= stock_height
+                        x >= 0
+                        and y >= 0
+                        and x + width <= stock_width
+                        and y + height <= stock_height
                 ):
                     # Check if the position is empty
-                    if np.all(stock[x : x + width, y : y + height] == -1):
+                    if np.all(stock[x: x + width, y: y + height] == -1):
                         self.cutted_stocks[stock_idx] = 1
-                        stock[x : x + width, y : y + height] = product_idx
+                        stock[x: x + width, y: y + height] = product_idx
                         self._products[product_idx]["quantity"] -= 1
+                        #print("valid move: ", x, y, width, height, stock_width, stock_height, stock_idx, product_idx)
 
         # An episode is done iff the all product quantities are 0
         terminated = all([product["quantity"] == 0 for product in self._products])
@@ -182,7 +204,6 @@ class CuttingStockEnv(gym.Env):
 
         if self.render_mode == "human":
             self._render_frame()
-
         return observation, reward, terminated, False, info
 
     def render(self):
@@ -196,7 +217,7 @@ class CuttingStockEnv(gym.Env):
 
     def _render_frame(self):
         window_size = self._get_window_size()
-        new_size = int(window_size[0]*0.75), int(window_size[1]*0.75)
+        new_size = int(window_size[0] * 0.75), int(window_size[1] * 0.75)
         if self.window is None and self.render_mode == "human":
             pygame.init()
             pygame.display.init()
@@ -246,8 +267,8 @@ class CuttingStockEnv(gym.Env):
                             canvas,
                             color,
                             pygame.Rect(
-                                round((i % (window_size[0] // self.max_w) * self.max_w + x)* pix_square_size),
-                                round((i // (window_size[0] // self.max_w) * self.max_h + y)* pix_square_size),
+                                round((i % (window_size[0] // self.max_w) * self.max_w + x) * pix_square_size),
+                                round((i // (window_size[0] // self.max_w) * self.max_h + y) * pix_square_size),
                                 round(pix_square_size),
                                 round(pix_square_size),
                             ),
