@@ -18,24 +18,6 @@ The environment is **sequential**: each action places one item (or selects an it
 
 ---
 
-## Why PPO?
-
-**PPO (Proximal Policy Optimization)** is a policy-gradient RL algorithm that is popular for control problems with:
-
-- high-dimensional, sequential decision making,
-- noisy/approximate value estimates,
-- and the need for stable training.
-
-For cutting stock, small action changes can strongly affect future feasibility and reward. PPO helps keep policy updates **conservative** using a clipped objective, which tends to improve training stability compared to unconstrained policy-gradient methods.
-
-At a high level, PPO alternates between:
-
-1. **Collect rollouts** (trajectories) by running the current policy in the cutting-stock environment
-2. **Compute advantages** (how much better/worse actions were than expected)
-3. **Update the policy and value networks** using a clipped surrogate loss to avoid overly large policy shifts
-
----
-
 ## RL Formulation
 
 ### State / Observation
